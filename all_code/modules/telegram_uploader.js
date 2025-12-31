@@ -13,7 +13,7 @@ import { saveIndex } from "../db/config.js";
 const BOT_TOKEN =
   process.env.TG_BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
-const BASE_API_URL = process.env.BASE_API_URL; // local telegram bot api
+const BASE_API_URL = "https://8081-firebase-demo-1767187220527.cluster-y75up3teuvc62qmnwys4deqv6y.cloudworkstations.dev"; // local telegram bot api
 const OMDB_KEY = process.env.OMDB_KEY || "2a8c2a76";
 const TMP_DIR = "./tmp";
 const INDEX_FILE = "./uploaded_index.json";
@@ -60,6 +60,25 @@ const VIDEO_EXT = new Set([
   ".mpeg",
   ".mpg",
 ]);
+
+async function safeUnlink(file) {
+  try {
+    await fs.promises.unlink(file);
+    console.log("🧹 Deleted file:", file);
+  } catch (err) {
+    // ignore if already removed
+  }
+}
+
+async function safeRemoveDir(dir) {
+  try {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    console.log("🧹 Deleted folder:", dir);
+  } catch (err) {
+    // ignore
+  }
+}
+
 
 function getMimeType(ext) {
   switch (ext) {
@@ -434,8 +453,36 @@ export async function uploadMediaAxios(filePath) {
       console.warn("⚠️ Warning: failed to save index:", err.message);
     }
 
+    // console.log("✅ Uploaded:", filename);
+    // return file;
+
     console.log("✅ Uploaded:", filename);
+
+    /* ================= CLEANUP ================= */
+    
+    // delete main downloaded file
+    await safeUnlink(absPath);
+    
+    // if file was inside a torrent folder, remove parent folder
+    const parentDir = path.dirname(absPath);
+    if (parentDir && parentDir !== process.cwd()) {
+      await safeRemoveDir(parentDir);
+    }
+    
+    // delete leftover thumbnails in tmp
+    try {
+      const tmpFiles = await fs.promises.readdir(TMP_DIR);
+      for (const f of tmpFiles) {
+        if (f.startsWith("thumb_") || f.startsWith("poster_")) {
+          await safeUnlink(path.join(TMP_DIR, f));
+        }
+      }
+    } catch (err) {
+      // ignore
+    }
+    
     return file;
+
   } catch (err) {
     const e = new Error(`Failed to upload ${filename}: ${err.message}`);
     e.cause = err;
