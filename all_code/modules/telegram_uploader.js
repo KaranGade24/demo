@@ -10,9 +10,9 @@ import { saveIndex } from "../db/config.js";
 /* ================= CONFIG ================= */
 
 const BOT_TOKEN =
-  process.env.TG_BOT_TOKEN || "8518518247:AAHB_nRYq_iS7bcRCXk0MGqnrKbF_AOgrlE";
-const CHANNEL_ID = "-1002459562680";
-const BASE_API_URL = "http://localhost:8081"; // local telegram bot api
+  process.env.TG_BOT_TOKEN;
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const BASE_API_URL = process.env.BASE_API_URL; // local telegram bot api
 const OMDB_KEY = process.env.OMDB_KEY || "2a8c2a76";
 const TMP_DIR = "./tmp";
 const INDEX_FILE = "./uploaded_index.json";
