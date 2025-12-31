@@ -47,10 +47,12 @@
 
 
 
-const { downloadTorrent, client: torrentClient } = require("./modules/downloader");
-const { uploadMediaAxios } = require("./modules/telegram_uploader");
-const { connectDB } = require("./db/config");
-require("dotenv").config();
+import { downloadTorrent, client as torrentClient } from "./modules/downloader.js";
+import { uploadMediaAxios } from "./modules/telegram_uploader.js";
+import { connectDB } from "./db/config.js";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 async function run() {
   let dbClient;

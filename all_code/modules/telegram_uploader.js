@@ -6,7 +6,7 @@ import { PassThrough } from "stream";
 import fetch from "node-fetch";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
-import { saveIndex } from "../db/config";
+import { saveIndex } from "../db/config.js";
 /* ================= CONFIG ================= */
 
 const BOT_TOKEN =

@@ -1,14 +1,20 @@
 
 // torrentDownloader.js
-const WebTorrent = require("webtorrent");
-const path = require("path");
-const fs = require("fs");
+import WebTorrent from "webtorrent";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const DOWNLOAD_DIR = path.join(__dirname, "downloads");
-fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 
+if (!fs.existsSync(DOWNLOAD_DIR)) {
+  fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+}
 // ✅ SINGLE shared client
-const client = new WebTorrent();
+export const client = new WebTorrent();
 
 // global safety logs
 client.on("error", err => console.error("❌ Client error:", err.message));
@@ -21,7 +27,7 @@ client.on("warning", err => console.warn("⚠️ Client warning:", err.message))
  * @param {number} stallTimeoutMs
  * @returns {Promise<Array<{name:string,path:string,size:number}>>}
  */
-function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTimeoutMs = 120000) {
+export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTimeoutMs = 120000) {
   return new Promise((resolve, reject) => {
     console.log("\n⬇️ Starting torrent download");
 
@@ -100,10 +106,10 @@ function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTimeoutMs =
   });
 }
 
-module.exports = {
-  downloadTorrent,
-  client
-};
+// module.exports = {
+//   downloadTorrent,
+//   client
+// };
 
 
 
