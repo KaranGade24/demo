@@ -9,9 +9,9 @@ import os
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pymongo import MongoClient
-
+from dotenv import load_dotenv
 # --- CONFIGURATION ---
-MONGO_URI = "mongodb+srv://erp:erp@cluster0.arjlve7.mongodb.net/telegram"
+MONGO_URI = os.getenv("MONGO_URI")
 BASE_URL = "https://www.5movierulz.hockey"
 
 HEADERS = {
