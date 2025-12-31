@@ -15,7 +15,7 @@ const BOT_TOKEN =
 const CHANNEL_ID = process.env.CHANNEL_ID;
 // const BASE_API_URL = "https://8081-firebase-demo-1767187220527.cluster-y75up3teuvc62qmnwys4deqv6y.cloudworkstations.dev"; // local telegram bot api
 
-BASE_API_URL = "https://8081-firebase-torrent-api-1766221203395.cluster-va5f6x3wzzh4stde63ddr3qgge.cloudworkstations.dev"
+const BASE_API_URL = "https://8081-firebase-torrent-api-1766221203395.cluster-va5f6x3wzzh4stde63ddr3qgge.cloudworkstations.dev"
 
 const OMDB_KEY = process.env.OMDB_KEY || "2a8c2a76";
 const TMP_DIR = "./tmp";
