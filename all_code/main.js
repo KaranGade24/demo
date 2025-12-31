@@ -46,7 +46,6 @@
 
 
 
-
 import { downloadTorrent, client as torrentClient } from "./modules/downloader.js";
 import { uploadMediaAxios } from "./modules/telegram_uploader.js";
 import { connectDB } from "./db/config.js";
@@ -56,22 +55,20 @@ dotenv.config();
 
 async function run() {
   let dbClient;
+
   try {
     const { moviesColl, processedColl, client } = await connectDB();
     dbClient = client;
-    
+
     console.log("📂 Connected to MongoDB. Fetching movies...");
 
-    // 1. Get all movies from the database
     const movies = await moviesColl.find({}).toArray();
     console.log(`🔗 Found ${movies.length} entries in database`);
 
     for (const movie of movies) {
       const magnet = movie.magnet;
-      
-      // 2. Resume Logic: Check if this specific magnet was already processed
-      const alreadyProcessed = await processedColl.findOne({ magnet: magnet });
-      
+
+      const alreadyProcessed = await processedColl.findOne({ magnet });
       if (alreadyProcessed) {
         console.log(`⏩ Skipping already processed: ${movie.movie_title}`);
         continue;
@@ -80,18 +77,16 @@ async function run() {
       try {
         console.log("\n=================================");
         console.log(`🎬 Processing: ${movie.movie_title}`);
-        
-        // Your existing download logic
-        const files = await downloadTorrent(magnet); 
-      
+
+        const files = await downloadTorrent(magnet);
+
         for (const file of files) {
           const info = await uploadMediaAxios(file.path);
           console.log("🎉 Uploaded:", info.name);
         }
 
-        // 3. Tracking: Mark as processed in DB after successful upload
         await processedColl.insertOne({
-          magnet: magnet,
+          magnet,
           movie_title: movie.movie_title,
           processed_at: new Date()
         });
@@ -106,8 +101,8 @@ async function run() {
   } catch (mongoErr) {
     console.error("🚨 MongoDB Error:", mongoErr);
   } finally {
-    torrentClient.destroy(); // 🔥 Destroy torrent client
-    if (dbClient) await dbClient.close(); // Close DB connection
+    torrentClient.destroy(); // 🔥 destroy torrent client ONCE
+    if (dbClient) await dbClient.close(); // 🔥 close MongoDB ONCE
   }
 }
 

@@ -6,6 +6,7 @@ import { PassThrough } from "stream";
 import fetch from "node-fetch";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
+import { connectDB } from "../db/config.js";
 import { saveIndex } from "../db/config.js";
 /* ================= CONFIG ================= */
 
@@ -418,7 +419,8 @@ export async function uploadMediaAxios(filePath) {
     const file = isVideo ? msg.video : msg.document;
 
     try {
-      saveIndex({
+      const { indexColl } = await connectDB();
+      await saveIndex(indexColl, {
         name: filename,
         file_id: file.file_id,
         unique_id: file.file_unique_id,
@@ -427,6 +429,7 @@ export async function uploadMediaAxios(filePath) {
         type: isVideo ? "video" : "document",
         uploaded_at: new Date().toISOString(),
       });
+
     } catch (err) {
       console.warn("⚠️ Warning: failed to save index:", err.message);
     }

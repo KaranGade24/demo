@@ -3,40 +3,34 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-
 const uri = process.env.MONGODB_URI;
 const client = new MongoClient(uri);
 
+let db;
+let isConnected = false;
+
 export async function connectDB() {
+  if (!isConnected) {
     await client.connect();
-    const db = client.db("telegram");
-    return {
-        db,
-        moviesColl: db.collection("movies"),
-        processedColl: db.collection("processed_magnets"),
-        client
-    };
-}
-
-
-export async function saveIndex(entry) {
-    let dbClient;
-    try {
-      const { db, client } = await connectDB();
-      dbClient = client;
-  
-      // Target the specific collection you requested
-      const indexColl = db.collection("telegram_movie_channel_id");
-  
-      // Add entry to MongoDB
-      await indexColl.insertOne(entry);
-      
-      console.log(`✅ Indexed in MongoDB: ${entry.name}`);
-    } catch (err) {
-      console.warn("⚠️ Failed to write to MongoDB Index:", err.message);
-    } finally {
-      if (dbClient) await dbClient.close();
-    }
+    db = client.db("telegram");
+    isConnected = true;
+    console.log("📂 Connected to MongoDB");
   }
 
-// module.exports = { connectDB,saveIndex };
+  return {
+    db,
+    moviesColl: db.collection("movies"),
+    processedColl: db.collection("processed_magnets"),
+    indexColl: db.collection("telegram_movie_channel_id"),
+    client
+  };
+}
+
+export async function saveIndex(indexColl, entry) {
+  try {
+    await indexColl.insertOne(entry);
+    console.log(`🗂️ Indexed in MongoDB: ${entry.name}`);
+  } catch (err) {
+    console.warn("⚠️ MongoDB Error:", err.message);
+  }
+}
