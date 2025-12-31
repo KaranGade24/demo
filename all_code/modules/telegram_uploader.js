@@ -403,7 +403,7 @@ export async function uploadMediaAxios(filePath) {
         headers,
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
-        timeout: 60_000,
+        timeout:0,
       }
     );
     process.stdout.write("\n");
