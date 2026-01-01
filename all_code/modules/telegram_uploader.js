@@ -82,6 +82,115 @@ async function safeRemoveDir(dir) {
   }
 }
 
+// Kill any ffmpeg commands we tracked (best-effort)
+function killActiveFFmpeg() {
+  try {
+    for (const cmd of Array.from(activeFFmpeg)) {
+      try {
+        if (cmd && typeof cmd.kill === "function") {
+          cmd.kill("SIGKILL");
+          console.log("🧯 Killed ffmpeg command");
+        }
+      } catch (err) {
+        // ignore
+      }
+      try {
+        activeFFmpeg.delete(cmd);
+      } catch (err) {}
+    }
+  } catch (err) {
+    // ignore
+  }
+}
+
+// Remove temporary files older than `olderThanMs` or matching `prefixes` (best-effort)
+async function cleanupTmpFiles({
+  prefixes = ["thumb_", "poster_", "thumb_opt_"],
+  olderThanMs = 10 * 60 * 1000,
+} = {}) {
+  try {
+    const files = await fs.promises.readdir(TMP_DIR);
+    const now = Date.now();
+    for (const f of files) {
+      const p = path.join(TMP_DIR, f);
+      try {
+        const st = await fs.promises.stat(p);
+        const tooOld = now - st.mtimeMs > olderThanMs;
+        const matchesPrefix = prefixes.some((pr) => f.startsWith(pr));
+        if (matchesPrefix || tooOld) {
+          await fs.promises.unlink(p).catch(() => {});
+          console.log("🧹 Removed tmp file:", p);
+        }
+      } catch (err) {
+        // ignore
+      }
+    }
+  } catch (err) {
+    // ignore
+  }
+}
+
+// High-level cleanup after upload (called on success and in finally cleanup)
+async function cleanupAfterUpload({ absPath, thumb, parentDir } = {}) {
+  try {
+    // Kill any lingering ffmpeg processes first
+    killActiveFFmpeg();
+
+    // remove the main file
+    if (absPath) {
+      await safeUnlink(absPath);
+    }
+
+    // If parent is a torrent download folder, remove it
+    if (parentDir && parentDir !== process.cwd()) {
+      await safeRemoveDir(parentDir);
+    }
+
+    // Remove tmp files associated with this upload + old tmp files
+    if (thumb) {
+      try {
+        await fs.promises.unlink(thumb).catch(() => {});
+      } catch (err) {}
+    }
+
+    await cleanupTmpFiles();
+
+    // attempt to release any lingering locks
+    try {
+      release("upload");
+    } catch (err) {}
+    try {
+      release("download");
+    } catch (err) {}
+
+    // Ensure streams are destroyed / variables nulled in caller
+
+    // Run GC if available and log memory usage
+    try {
+      if (typeof global !== "undefined" && typeof global.gc === "function") {
+        global.gc();
+        setTimeout(() => {
+          try {
+            global.gc();
+          } catch (e) {}
+        }, 100);
+      }
+    } catch (err) {}
+
+    try {
+      const mu = process.memoryUsage();
+      console.log("🧠 Memory usage (rss/heapUsed/heapTotal):", {
+        rss: humanSize(mu.rss || 0),
+        heapUsed: humanSize(mu.heapUsed || 0),
+        heapTotal: humanSize(mu.heapTotal || 0),
+      });
+    } catch (err) {}
+  } catch (err) {
+    // ignore top level cleanup errors
+    console.warn("⚠️ cleanupAfterUpload error:", err.message);
+  }
+}
+
 function getMimeType(ext) {
   switch (ext) {
     case ".mp4":
@@ -148,23 +257,48 @@ async function generateVideoThumbnailFromVideo(
     }
 
     console.log("ℹ️ Generating thumbnail at timestamp:", timestamp);
-    ffmpeg(filePath)
-      .screenshots({
+    try {
+      const cmd = ffmpeg(filePath).screenshots({
         timestamps: [timestamp],
         filename: path.basename(out),
         folder: TMP_DIR,
         size: `${size}x?`,
-      })
-      .on("end", async () => {
-        const ok = await optimizeThumbnail(out, filePath);
-        resolve(ok ? out : null);
-      })
-      .on("error", (err) => {
-        console.warn("⚠️ generateVideoThumbnailFromVideo failed:", err.message);
-        resolve(null);
       });
+
+      // Track command so we can attempt to kill if needed
+      try {
+        activeFFmpeg.add(cmd);
+      } catch (err) {}
+
+      cmd
+        .on("end", async () => {
+          try {
+            activeFFmpeg.delete(cmd);
+          } catch (e) {}
+          const ok = await optimizeThumbnail(out, filePath);
+          resolve(ok ? out : null);
+        })
+        .on("error", (err) => {
+          try {
+            activeFFmpeg.delete(cmd);
+          } catch (e) {}
+          console.warn(
+            "⚠️ generateVideoThumbnailFromVideo failed:",
+            err.message
+          );
+          resolve(null);
+        });
+    } catch (err) {
+      console.warn(
+        "⚠️ generateVideoThumbnailFromVideo (startup) failed:",
+        err.message
+      );
+      resolve(null);
+    }
   });
 }
+
+const activeFFmpeg = new Set();
 
 async function optimizeThumbnail(thumbPath, filePath) {
   try {
@@ -178,14 +312,34 @@ async function optimizeThumbnail(thumbPath, filePath) {
       const out = `${TMP_DIR}/thumb_opt_${s}_${Date.now()}.jpg`;
       try {
         await new Promise((resolve, reject) => {
-          ffmpeg(filePath)
+          const cmd = ffmpeg(filePath)
             .outputOptions(["-vframes 1", "-q:v 6"])
             .size(`${s}x?`)
             .output(out)
             .on("end", resolve)
-            .on("error", reject)
-            .run();
+            .on("error", reject);
+
+          // track command for potential killing
+          try {
+            activeFFmpeg.add(cmd);
+            cmd.run();
+          } catch (err) {
+            // if tracking fails, still try to run
+            try {
+              cmd.run();
+            } catch (e) {}
+          }
         });
+
+        // remove from active set if present
+        try {
+          for (const c of activeFFmpeg) {
+            // remove any finished commands (best-effort)
+            // fluent-ffmpeg doesn't provide a direct 'finished' flag here
+            // so we clear the set conservatively after each run
+            activeFFmpeg.delete(c);
+          }
+        } catch (err) {}
 
         const newStat = await fs.promises.stat(out);
         if (newStat.size <= maxSize) {
@@ -428,65 +582,70 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
   const total = Number(headers["Content-Length"] || 0);
   form.pipe(progressStream);
 
-  // Throttled, in-place console updates and optional callback reporting
-  let lastLineLen = 0;
-  let lastUpdate = 0;
-  const UPDATE_MS = 200;
-  function writeProgressLine(line) {
-    // pad with spaces to clear previous longer content
-    const pad =
-      lastLineLen > line.length ? " ".repeat(lastLineLen - line.length) : "";
-    process.stdout.write("\r" + line + pad);
-    lastLineLen = line.length;
-  }
-
-  // track lock ownership so only one module logs progress
-  let haveLock = false;
-
-  progressStream.on("data", (chunk) => {
-    uploaded += chunk.length;
-    const now = Date.now();
-
-    // try to acquire lock if we don't own it yet
-    if (!haveLock) {
-      haveLock = tryAcquire("upload");
-      if (haveLock) console.log("\nℹ️ Showing upload progress");
-    }
-
-    if (total) {
-      const pct = Math.min(100, Number(((uploaded / total) * 100).toFixed(2)));
-      const line = `⬆️ Uploading ${filename}: ${humanSize(
-        uploaded
-      )}/${humanSize(total)} (${pct}%)`;
-      if (now - lastUpdate >= UPDATE_MS) {
-        // only write if we own the lock
-        if (currentOwner() === "upload") {
-          writeProgressLine(line);
-        }
-        lastUpdate = now;
-        if (typeof onProgress === "function") {
-          try {
-            onProgress({ uploaded, total, pct });
-          } catch (err) {}
-        }
-      }
-    } else {
-      const line = `⬆️ Uploading ${filename}: ${humanSize(uploaded)} uploaded`;
-      if (now - lastUpdate >= UPDATE_MS) {
-        if (currentOwner() === "upload") {
-          writeProgressLine(line);
-        }
-        lastUpdate = now;
-        if (typeof onProgress === "function") {
-          try {
-            onProgress({ uploaded, total: null, pct: null });
-          } catch (err) {}
-        }
-      }
-    }
-  });
-
   try {
+    // Throttled, in-place console updates and optional callback reporting
+    let lastLineLen = 0;
+    let lastUpdate = 0;
+    const UPDATE_MS = 200;
+    function writeProgressLine(line) {
+      // pad with spaces to clear previous longer content
+      const pad =
+        lastLineLen > line.length ? " ".repeat(lastLineLen - line.length) : "";
+      process.stdout.write("\r" + line + pad);
+      lastLineLen = line.length;
+    }
+
+    // track lock ownership so only one module logs progress
+    let haveLock = false;
+
+    progressStream.on("data", (chunk) => {
+      uploaded += chunk.length;
+      const now = Date.now();
+
+      // try to acquire lock if we don't own it yet
+      if (!haveLock) {
+        haveLock = tryAcquire("upload");
+        if (haveLock) console.log("\nℹ️ Showing upload progress");
+      }
+
+      if (total) {
+        const pct = Math.min(
+          100,
+          Number(((uploaded / total) * 100).toFixed(2))
+        );
+        const line = `⬆️ Uploading ${filename}: ${humanSize(
+          uploaded
+        )}/${humanSize(total)} (${pct}%)`;
+        if (now - lastUpdate >= UPDATE_MS) {
+          // only write if we own the lock
+          if (currentOwner() === "upload") {
+            writeProgressLine(line);
+          }
+          lastUpdate = now;
+          if (typeof onProgress === "function") {
+            try {
+              onProgress({ uploaded, total, pct });
+            } catch (err) {}
+          }
+        }
+      } else {
+        const line = `⬆️ Uploading ${filename}: ${humanSize(
+          uploaded
+        )} uploaded`;
+        if (now - lastUpdate >= UPDATE_MS) {
+          if (currentOwner() === "upload") {
+            writeProgressLine(line);
+          }
+          lastUpdate = now;
+          if (typeof onProgress === "function") {
+            try {
+              onProgress({ uploaded, total: null, pct: null });
+            } catch (err) {}
+          }
+        }
+      }
+    });
+
     const res = await axios.post(
       `${BASE_API_URL}/bot${BOT_TOKEN}/${endpoint}`,
       progressStream,
@@ -524,6 +683,68 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     const msg = res.data.result;
     const file = isVideo ? msg.video : msg.document;
 
+    // Ensure streams are destroyed and memory freed regardless of success/failure
+    try {
+      if (
+        typeof fileStream !== "undefined" &&
+        fileStream &&
+        typeof fileStream.destroy === "function"
+      ) {
+        try {
+          fileStream.destroy();
+        } catch (e) {}
+      }
+    } catch (err) {}
+
+    try {
+      if (
+        typeof thumbStream !== "undefined" &&
+        thumbStream &&
+        typeof thumbStream.destroy === "function"
+      ) {
+        try {
+          thumbStream.destroy();
+        } catch (e) {}
+      }
+    } catch (err) {}
+
+    try {
+      if (
+        typeof progressStream !== "undefined" &&
+        progressStream &&
+        typeof progressStream.destroy === "function"
+      ) {
+        try {
+          progressStream.destroy();
+        } catch (e) {}
+      }
+    } catch (err) {}
+
+    try {
+      fileStream = null;
+      thumbStream = null;
+      progressStream = null;
+    } catch (err) {}
+
+    // Kill any lingering ffmpeg procs and cleanup old tmp files
+    try {
+      killActiveFFmpeg();
+      await cleanupTmpFiles();
+    } catch (err) {}
+
+    // Try to trigger GC if node was started with --expose-gc
+    try {
+      if (typeof global !== "undefined" && typeof global.gc === "function") {
+        global.gc();
+        setTimeout(() => {
+          try {
+            global.gc();
+          } catch (e) {}
+        }, 100);
+      }
+    } catch (err) {}
+
+    // Save index in DB (best-effort)
     try {
       const { indexColl } = await connectDB();
       await saveIndex(indexColl, {
@@ -539,32 +760,16 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
       console.warn("⚠️ Warning: failed to save index:", err.message);
     }
 
-    // console.log("✅ Uploaded:", filename);
-    // return file;
-
     console.log("✅ Uploaded:", filename);
 
     /* ================= CLEANUP ================= */
 
-    // delete main downloaded file
-    await safeUnlink(absPath);
-
-    // if file was inside a torrent folder, remove parent folder
+    // perform consolidated cleanup and memory refresh
     const parentDir = path.dirname(absPath);
-    if (parentDir && parentDir !== process.cwd()) {
-      await safeRemoveDir(parentDir);
-    }
-
-    // delete leftover thumbnails in tmp
     try {
-      const tmpFiles = await fs.promises.readdir(TMP_DIR);
-      for (const f of tmpFiles) {
-        if (f.startsWith("thumb_") || f.startsWith("poster_")) {
-          await safeUnlink(path.join(TMP_DIR, f));
-        }
-      }
+      await cleanupAfterUpload({ absPath, thumb, parentDir });
     } catch (err) {
-      // ignore
+      console.warn("⚠️ cleanupAfterUpload failed:", err.message);
     }
 
     return file;
@@ -578,9 +783,10 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     e.cause = err;
     throw e;
   } finally {
+    // Remove thumbnail (best-effort)
     if (thumb) {
       try {
-        await fs.promises.unlink(thumb);
+        await fs.promises.unlink(thumb).catch(() => {});
       } catch (unlinkErr) {
         console.warn("⚠️ Failed to remove temp thumbnail:", unlinkErr.message);
       }
@@ -593,7 +799,9 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
         fileStream &&
         typeof fileStream.destroy === "function"
       ) {
-        fileStream.destroy();
+        try {
+          fileStream.destroy();
+        } catch (e) {}
       }
     } catch (err) {}
 
@@ -603,7 +811,9 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
         thumbStream &&
         typeof thumbStream.destroy === "function"
       ) {
-        thumbStream.destroy();
+        try {
+          thumbStream.destroy();
+        } catch (e) {}
       }
     } catch (err) {}
 
@@ -613,26 +823,60 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
         progressStream &&
         typeof progressStream.destroy === "function"
       ) {
-        progressStream.destroy();
+        try {
+          progressStream.destroy();
+        } catch (e) {}
       }
     } catch (err) {}
 
     try {
       fileStream = null;
       thumbStream = null;
+      progressStream = null;
+    } catch (err) {}
+
+    // Kill any lingering ffmpeg procs and cleanup old tmp files
+    try {
+      killActiveFFmpeg();
+      await cleanupTmpFiles();
     } catch (err) {}
 
     // Try to trigger GC if node was started with --expose-gc
     try {
       if (typeof global !== "undefined" && typeof global.gc === "function") {
         global.gc();
+        setTimeout(() => {
+          try {
+            global.gc();
+          } catch (e) {}
+        }, 100);
       }
+    } catch (err) {}
+
+    // log memory usage for diagnostics
+    try {
+      const mu = process.memoryUsage();
+      console.log("🧠 Memory usage (rss/heapUsed/heapTotal):", {
+        rss: humanSize(mu.rss || 0),
+        heapUsed: humanSize(mu.heapUsed || 0),
+        heapTotal: humanSize(mu.heapTotal || 0),
+      });
     } catch (err) {}
 
     // ensure lock released
     try {
       release("upload");
     } catch (err) {}
+  }
+}
+
+// Allow other modules to trigger a refresh/cleanup between runs
+export async function refreshSystemCleanup(opts = {}) {
+  try {
+    await cleanupAfterUpload(opts);
+    console.log("✅ System refresh/cleanup completed");
+  } catch (err) {
+    console.warn("⚠️ refreshSystemCleanup failed:", err.message);
   }
 }
 
