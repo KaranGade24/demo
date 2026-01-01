@@ -396,6 +396,27 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     //   err.message;
   }
 
+  // Build headers (including Content-Length when available) and determine endpoint
+  let headers;
+  const endpoint = isVideo ? "sendVideo" : "sendDocument";
+  try {
+    headers = form.getHeaders();
+    // getLength uses a callback
+    const length = await new Promise((resolve, reject) =>
+      form.getLength((err, l) => (err ? reject(err) : resolve(l)))
+    );
+    if (typeof length === "number") {
+      headers["Content-Length"] = String(length);
+    }
+  } catch (err) {
+    console.warn(
+      "⚠️ Could not calculate content length; proceeding without it:",
+      err.message
+    );
+    // Ensure headers exist even if length calculation failed
+    headers = headers || form.getHeaders();
+  }
+
   console.log("ℹ️ Upload headers:", {
     "Content-Type": headers["Content-Type"] || headers["content-type"],
     "Has-Content-Length": typeof headers["Content-Length"] !== "undefined",
