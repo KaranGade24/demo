@@ -11,6 +11,7 @@ try {
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+import { tryAcquire, release, currentOwner } from "./progress_manager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,6 +88,12 @@ export function downloadTorrent(
       if (removed) return;
       removed = true;
       try {
+        // release progress lock when cleaning up
+        try {
+          release("download");
+        } catch (e) {}
+      } catch (err) {}
+      try {
         torrent.destroy({ destroyStore: false }, () => {});
       } catch (err) {
         /* ignore */
@@ -111,6 +118,7 @@ export function downloadTorrent(
     });
 
     /** PROGRESS DISPLAY */
+    let haveLock = false;
     torrent.on("download", () => {
       const percent = (torrent.progress * 100).toFixed(2);
       const speed = (torrent.downloadSpeed / 1024 / 1024).toFixed(2);
@@ -126,9 +134,18 @@ export function downloadTorrent(
           ? `${(timeRemaining / 3600).toFixed(1)}h`
           : `${(timeRemaining / 60).toFixed(1)}m`;
 
-      process.stdout.write(
-        `⏳ ${percent}% | 🚀 ${speed} MB/s | 👥 ${peers} peers | ⏱️ ETA: ${eta}       \r`
-      );
+      // Try to acquire lock if not owned; allows waiting progress to take over later
+      if (!haveLock) {
+        haveLock = tryAcquire("download");
+        if (haveLock) console.log("\nℹ️ Showing download progress");
+      }
+
+      // Only print to console when we own the lock
+      if (currentOwner() === "download") {
+        process.stdout.write(
+          `⏳ ${percent}% | 🚀 ${speed} MB/s | 👥 ${peers} peers | ⏱️ ETA: ${eta}       \r`
+        );
+      }
     });
 
     /** STALL DETECTOR (only AFTER metadata) - SMARTER with peer recovery */
@@ -158,6 +175,11 @@ export function downloadTorrent(
       clearInterval(stallChecker);
       console.log("\n✅ Download completed");
 
+      // Release progress lock so waiting upload can show its progress
+      try {
+        release("download");
+      } catch (err) {}
+
       const files = torrent.files.map((f) => ({
         name: f.name,
         path: path.resolve(DOWNLOAD_DIR, f.path), // Use absolute path
@@ -169,6 +191,9 @@ export function downloadTorrent(
 
     // safety: if torrent emits an error
     torrent.on("error", (err) => {
+      try {
+        release("download");
+      } catch (e) {}
       cleanup(`Torrent error: ${err.message}`);
     });
   });

@@ -8,6 +8,7 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegPath from "ffmpeg-static";
 import { connectDB } from "../db/config.js";
 import { saveIndex } from "../db/config.js";
+import { tryAcquire, release, currentOwner } from "./progress_manager.js";
 /* ================= CONFIG ================= */
 
 const BOT_TOKEN = process.env.TG_BOT_TOKEN;
@@ -334,6 +335,9 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
   }
 
   const form = new FormData();
+  // Keep references to created read streams so we can destroy them explicitly after upload
+  let fileStream;
+  let thumbStream;
   form.append("chat_id", CHANNEL_ID);
   form.append("parse_mode", "HTML");
 
@@ -353,43 +357,43 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     );
 
     if (thumb) {
-      form.append("thumbnail", fs.createReadStream(thumb), {
-        filename: path.basename(thumb),
-        contentType: getMimeType(path.extname(thumb).toLowerCase()),
-      });
-      console.log("ℹ️ Using thumbnail:", thumb);
+      try {
+        thumbStream = fs.createReadStream(thumb);
+        form.append("thumbnail", thumbStream, {
+          filename: path.basename(thumb),
+          contentType: getMimeType(path.extname(thumb).toLowerCase()),
+        });
+        console.log("ℹ️ Using thumbnail:", thumb);
+      } catch (err) {
+        console.warn("⚠️ Failed to create thumbnail stream:", err.message);
+      }
     }
 
-    form.append("video", fs.createReadStream(absPath), {
-      filename,
-      contentType: getMimeType(ext),
-    });
+    try {
+      fileStream = fs.createReadStream(absPath);
+      form.append("video", fileStream, {
+        filename,
+        contentType: getMimeType(ext),
+      });
+    } catch (err) {
+      console.warn("⚠️ Failed to create file stream:", err.message);
+      throw err;
+    }
   } else {
     form.append("caption", `📁 <b>${filename}</b>\n📦 ${humanSize(stat.size)}`);
 
-    form.append("document", fs.createReadStream(absPath), {
-      filename,
-      contentType: getMimeType(ext),
-    });
-  }
-
-  const endpoint = isVideo ? "sendVideo" : "sendDocument";
-
-  // Prepare headers — include Content-Length when possible to avoid chunked requests
-  const headers = form.getHeaders();
-  try {
-    const len = await new Promise((resolve, reject) =>
-      form.getLength((err, l) => (err ? reject(err) : resolve(l)))
-    );
-    // set as string and ensure common casing
-    headers["Content-Length"] = String(len);
-    headers["Content-Type"] =
-      headers["content-type"] || headers["Content-Type"];
-  } catch (err) {
-    console.warn(
-      "⚠️ Could not calculate content length; proceeding without it:",
-      err.message
-    );
+    try {
+      fileStream = fs.createReadStream(absPath);
+      form.append("document", fileStream, {
+        filename,
+        contentType: getMimeType(ext),
+      });
+    } catch (err) {
+      console.warn("⚠️ Failed to create file stream:", err.message);
+      throw err;
+    }
+    // "⚠️ Could not calculate content length; proceeding without it:",
+    //   err.message;
   }
 
   console.log("ℹ️ Upload headers:", {
@@ -415,16 +419,29 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     lastLineLen = line.length;
   }
 
+  // track lock ownership so only one module logs progress
+  let haveLock = false;
+
   progressStream.on("data", (chunk) => {
     uploaded += chunk.length;
     const now = Date.now();
+
+    // try to acquire lock if we don't own it yet
+    if (!haveLock) {
+      haveLock = tryAcquire("upload");
+      if (haveLock) console.log("\nℹ️ Showing upload progress");
+    }
+
     if (total) {
       const pct = Math.min(100, Number(((uploaded / total) * 100).toFixed(2)));
       const line = `⬆️ Uploading ${filename}: ${humanSize(
         uploaded
       )}/${humanSize(total)} (${pct}%)`;
       if (now - lastUpdate >= UPDATE_MS) {
-        writeProgressLine(line);
+        // only write if we own the lock
+        if (currentOwner() === "upload") {
+          writeProgressLine(line);
+        }
         lastUpdate = now;
         if (typeof onProgress === "function") {
           try {
@@ -435,7 +452,9 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
     } else {
       const line = `⬆️ Uploading ${filename}: ${humanSize(uploaded)} uploaded`;
       if (now - lastUpdate >= UPDATE_MS) {
-        writeProgressLine(line);
+        if (currentOwner() === "upload") {
+          writeProgressLine(line);
+        }
         lastUpdate = now;
         if (typeof onProgress === "function") {
           try {
@@ -469,6 +488,11 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
         });
       } catch (err) {}
     }
+
+    // Release upload lock so waiting downloads can show progress
+    try {
+      release("upload");
+    } catch (err) {}
 
     if (!res?.data || res.data.ok === false) {
       throw new Error(
@@ -524,6 +548,11 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
 
     return file;
   } catch (err) {
+    // ensure lock is released on error too
+    try {
+      release("upload");
+    } catch (e) {}
+
     const e = new Error(`Failed to upload ${filename}: ${err.message}`);
     e.cause = err;
     throw e;
@@ -535,6 +564,54 @@ export async function uploadMediaAxios(filePath, { onProgress } = {}) {
         console.warn("⚠️ Failed to remove temp thumbnail:", unlinkErr.message);
       }
     }
+
+    // Ensure streams are destroyed and memory freed regardless of success/failure
+    try {
+      if (
+        typeof fileStream !== "undefined" &&
+        fileStream &&
+        typeof fileStream.destroy === "function"
+      ) {
+        fileStream.destroy();
+      }
+    } catch (err) {}
+
+    try {
+      if (
+        typeof thumbStream !== "undefined" &&
+        thumbStream &&
+        typeof thumbStream.destroy === "function"
+      ) {
+        thumbStream.destroy();
+      }
+    } catch (err) {}
+
+    try {
+      if (
+        typeof progressStream !== "undefined" &&
+        progressStream &&
+        typeof progressStream.destroy === "function"
+      ) {
+        progressStream.destroy();
+      }
+    } catch (err) {}
+
+    try {
+      fileStream = null;
+      thumbStream = null;
+    } catch (err) {}
+
+    // Try to trigger GC if node was started with --expose-gc
+    try {
+      if (typeof global !== "undefined" && typeof global.gc === "function") {
+        global.gc();
+      }
+    } catch (err) {}
+
+    // ensure lock released
+    try {
+      release("upload");
+    } catch (err) {}
   }
 }
 
