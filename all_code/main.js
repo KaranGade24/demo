@@ -25,17 +25,17 @@
 //     try {
 //       console.log("\n=================================");
 //       const files = await downloadTorrent(link); // your side
-    
+
 //       for (const file of files) {
-         
+
 //           const info = await uploadMediaAxios(file.path);
 //           console.log("🎉 Uploaded:", info.name);
-        
+
 //       }
 //     } catch (err) {
 //       console.warn("⚠️ Skipped:", err.message);
 //     }
-    
+
 //   }
 
 //   console.log("\n✅ All torrents processed");
@@ -44,9 +44,10 @@
 
 // run();
 
-
-
-import { downloadTorrent, client as torrentClient } from "./modules/downloader.js";
+import {
+  downloadTorrent,
+  client as torrentClient,
+} from "./modules/downloader.js";
 import { uploadMediaAxios } from "./modules/telegram_uploader.js";
 import { connectDB } from "./db/config.js";
 import dotenv from "dotenv";
@@ -81,23 +82,27 @@ async function run() {
         const files = await downloadTorrent(magnet);
 
         for (const file of files) {
-          const info = await uploadMediaAxios(file.path);
+          const info = await uploadMediaAxios(file.path, {
+            onProgress: ({ uploaded, total, pct }) => {
+              // Example: send updates to a UI or server; kept minimal here to avoid duplicate stdout
+              // To debug locally, you could uncomment the next line (may duplicate uploader output):
+              // if (pct) process.stdout.write(`\r${pct}%`);
+            },
+          });
           console.log("🎉 Uploaded:", info.name);
         }
 
         await processedColl.insertOne({
           magnet,
           movie_title: movie.movie_title,
-          processed_at: new Date()
+          processed_at: new Date(),
         });
-
       } catch (err) {
         console.warn(`⚠️ Skipped ${movie.movie_title}:`, err.message);
       }
     }
 
     console.log("\n✅ All database entries processed");
-
   } catch (mongoErr) {
     console.error("🚨 MongoDB Error:", mongoErr);
   } finally {

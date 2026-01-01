@@ -10,12 +10,12 @@ import { connectDB } from "../db/config.js";
 import { saveIndex } from "../db/config.js";
 /* ================= CONFIG ================= */
 
-const BOT_TOKEN =
-  process.env.TG_BOT_TOKEN;
+const BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 // const BASE_API_URL = "https://8081-firebase-demo-1767187220527.cluster-y75up3teuvc62qmnwys4deqv6y.cloudworkstations.dev"; // local telegram bot api
 
-const BASE_API_URL = "https://8081-firebase-demo-1767187220527.cluster-y75up3teuvc62qmnwys4deqv6y.cloudworkstations.dev"
+const BASE_API_URL =
+  "https://8081-firebase-demo-1767187220527.cluster-y75up3teuvc62qmnwys4deqv6y.cloudworkstations.dev";
 const OMDB_KEY = process.env.OMDB_KEY || "2a8c2a76";
 const TMP_DIR = "./tmp";
 const INDEX_FILE = "./uploaded_index.json";
@@ -80,7 +80,6 @@ async function safeRemoveDir(dir) {
     // ignore
   }
 }
-
 
 function getMimeType(ext) {
   switch (ext) {
@@ -271,7 +270,7 @@ async function getThumbnail(title, filePath = null, duration = 0) {
 
 /* ================= MAIN UPLOAD ================= */
 
-export async function uploadMediaAxios(filePath) {
+export async function uploadMediaAxios(filePath, { onProgress } = {}) {
   if (typeof filePath !== "string") {
     throw new TypeError("filePath must be a string");
   }
@@ -340,7 +339,7 @@ export async function uploadMediaAxios(filePath) {
 
   if (isVideo) {
     // Only enable supports_streaming for MP4 (Telegram streams mp4)
-    // if (ext === ".mp4") 
+    // if (ext === ".mp4")
     form.append("supports_streaming", "true");
 
     if (meta.duration)
@@ -403,17 +402,47 @@ export async function uploadMediaAxios(filePath) {
   let uploaded = 0;
   const total = Number(headers["Content-Length"] || 0);
   form.pipe(progressStream);
+
+  // Throttled, in-place console updates and optional callback reporting
+  let lastLineLen = 0;
+  let lastUpdate = 0;
+  const UPDATE_MS = 200;
+  function writeProgressLine(line) {
+    // pad with spaces to clear previous longer content
+    const pad =
+      lastLineLen > line.length ? " ".repeat(lastLineLen - line.length) : "";
+    process.stdout.write("\r" + line + pad);
+    lastLineLen = line.length;
+  }
+
   progressStream.on("data", (chunk) => {
     uploaded += chunk.length;
+    const now = Date.now();
     if (total) {
-      const pct = Math.min(100, ((uploaded / total) * 100).toFixed(2));
-      process.stdout.write(
-        `\r⬆️ Uploading ${filename}: ${uploaded}/${total} bytes (${pct}%)`
-      );
+      const pct = Math.min(100, Number(((uploaded / total) * 100).toFixed(2)));
+      const line = `⬆️ Uploading ${filename}: ${humanSize(
+        uploaded
+      )}/${humanSize(total)} (${pct}%)`;
+      if (now - lastUpdate >= UPDATE_MS) {
+        writeProgressLine(line);
+        lastUpdate = now;
+        if (typeof onProgress === "function") {
+          try {
+            onProgress({ uploaded, total, pct });
+          } catch (err) {}
+        }
+      }
     } else {
-      process.stdout.write(
-        `\r⬆️ Uploading ${filename}: ${humanSize(uploaded)} uploaded`
-      );
+      const line = `⬆️ Uploading ${filename}: ${humanSize(uploaded)} uploaded`;
+      if (now - lastUpdate >= UPDATE_MS) {
+        writeProgressLine(line);
+        lastUpdate = now;
+        if (typeof onProgress === "function") {
+          try {
+            onProgress({ uploaded, total: null, pct: null });
+          } catch (err) {}
+        }
+      }
     }
   });
 
@@ -425,10 +454,21 @@ export async function uploadMediaAxios(filePath) {
         headers,
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
-        timeout:0,
+        timeout: 0,
       }
     );
     process.stdout.write("\n");
+
+    // Final progress callback (ensure callers know we're done)
+    if (typeof onProgress === "function") {
+      try {
+        onProgress({
+          uploaded: total || uploaded,
+          total: total || uploaded,
+          pct: 100,
+        });
+      } catch (err) {}
+    }
 
     if (!res?.data || res.data.ok === false) {
       throw new Error(
@@ -450,7 +490,6 @@ export async function uploadMediaAxios(filePath) {
         type: isVideo ? "video" : "document",
         uploaded_at: new Date().toISOString(),
       });
-
     } catch (err) {
       console.warn("⚠️ Warning: failed to save index:", err.message);
     }
@@ -461,16 +500,16 @@ export async function uploadMediaAxios(filePath) {
     console.log("✅ Uploaded:", filename);
 
     /* ================= CLEANUP ================= */
-    
+
     // delete main downloaded file
     await safeUnlink(absPath);
-    
+
     // if file was inside a torrent folder, remove parent folder
     const parentDir = path.dirname(absPath);
     if (parentDir && parentDir !== process.cwd()) {
       await safeRemoveDir(parentDir);
     }
-    
+
     // delete leftover thumbnails in tmp
     try {
       const tmpFiles = await fs.promises.readdir(TMP_DIR);
@@ -482,9 +521,8 @@ export async function uploadMediaAxios(filePath) {
     } catch (err) {
       // ignore
     }
-    
-    return file;
 
+    return file;
   } catch (err) {
     const e = new Error(`Failed to upload ${filename}: ${err.message}`);
     e.cause = err;
@@ -499,12 +537,6 @@ export async function uploadMediaAxios(filePath) {
     }
   }
 }
-
-
-
-
-
-
 
 // // uploader.js
 // // uploader.js
@@ -721,5 +753,3 @@ export async function uploadMediaAxios(filePath) {
 // }
 
 // module.exports = { uploadMediaAxios };
-
-

@@ -25,6 +25,6 @@
     "progress-stream": "^2.0.0",
     "sqlite3": "^5.1.7",
     "transmission-rpc": "^0.1.0",
-    "webtorrent": "^1.9.7"
+    "webtorrent-hybrid": "^1.0.0"
   }
 }

@@ -1,6 +1,13 @@
-
 // torrentDownloader.js
-import WebTorrent from "webtorrent";
+// Prefer `webtorrent-hybrid` for TCP/UDP support; fall back to `webtorrent` if hybrid isn't installed.
+let WebTorrent;
+try {
+  WebTorrent = (await import("webtorrent-hybrid")).default;
+  console.log("🔁 Using webtorrent-hybrid for torrent downloads");
+} catch (err) {
+  WebTorrent = (await import("webtorrent")).default;
+  console.warn("⚠️ webtorrent-hybrid not found; falling back to webtorrent");
+} // dynamic import ensures code runs even if hybrid isn't installed yet
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
@@ -16,24 +23,20 @@ if (!fs.existsSync(DOWNLOAD_DIR)) {
 
 // ✅ OPTIMIZED shared client for FASTER downloads
 export const client = new WebTorrent({
-  maxConns: 500,                    // Max simultaneous connections (default 55)
-  maxWebConns: 200,                 // Max WebRTC connections
-  uploadLimit: 10 * 1024 * 1024,   // 10 MB/s upload (prioritize download)
-  downloadLimit: -1,                // Unlimited download speed
-  dht: true,                        // Enable DHT peer discovery
-  tracker: true,                    // Enable tracker communication
-  lsd: true,                        // Local Service Discovery
-  pex: true,                        // Peer Exchange
-  iceServers: [
-    { urls: ["stun:stun.l.google.com:19302"] },
-    { urls: ["stun:stun1.l.google.com:19302"] },
-    { urls: ["stun:stun2.l.google.com:19302"] }
-  ]
+  maxConns: 500, // Max simultaneous connections (default 55)
+  maxWebConns: 200, // Max WebRTC connections
+  uploadLimit: 10 * 1024 * 1024, // 10 MB/s upload (prioritize download)
+  downloadLimit: -1, // Unlimited download speed
+  dht: true, // Enable DHT peer discovery
+  tracker: true, // Enable tracker communication
+  lsd: true, // Local Service Discovery
+  pex: true, // Peer Exchange
+  // NOTE: Removed STUN/ICE servers as requested — relying on TCP/UDP trackers, DHT, PEX and LSD for peer discovery
 });
 
 // global safety logs
-client.on("error", err => console.error("❌ Client error:", err.message));
-client.on("warning", err => console.warn("⚠️ Client warning:", err.message));
+client.on("error", (err) => console.error("❌ Client error:", err.message));
+client.on("warning", (err) => console.warn("⚠️ Client warning:", err.message));
 
 /**
  * Download torrent safely
@@ -42,7 +45,11 @@ client.on("warning", err => console.warn("⚠️ Client warning:", err.message))
  * @param {number} stallTimeoutMs
  * @returns {Promise<Array<{name:string,path:string,size:number}>>}
  */
-export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTimeoutMs = 120000) {
+export function downloadTorrent(
+  magnetLink,
+  metadataTimeoutMs = 60000,
+  stallTimeoutMs = 120000
+) {
   return new Promise((resolve, reject) => {
     console.log("\n⬇️ Starting torrent download");
 
@@ -51,8 +58,26 @@ export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTime
     let metadataReceived = false;
     let lastProgress = 0;
 
+    // Add fallback public trackers to improve peer discovery (no STUN/ICE used)
+    const addFallbackTrackers = (magnet) => {
+      const trackers = [
+        "udp://tracker.openbittorrent.com:80/announce",
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://tracker.leechers-paradise.org:6969/announce",
+        "udp://tracker.coppersurfer.tk:6969/announce",
+        "udp://exodus.desync.com:6969/announce",
+      ];
+      // If the magnet link already includes trackers, append unique ones only
+      const hasTr = /(&|\?)tr=/i.test(magnet);
+      const append = trackers
+        .map((t) => `&tr=${encodeURIComponent(t)}`)
+        .join("");
+      return hasTr ? magnet + append : magnet + append;
+    };
+
     try {
-      torrent = client.add(magnetLink, { path: DOWNLOAD_DIR });
+      const magnetWithTrackers = addFallbackTrackers(magnetLink);
+      torrent = client.add(magnetWithTrackers, { path: DOWNLOAD_DIR });
     } catch (err) {
       return reject(err);
     }
@@ -62,8 +87,10 @@ export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTime
       if (removed) return;
       removed = true;
       try {
-        torrent.destroy({ destroyStore: false }, () => { });
-      } catch (err) { /* ignore */ }
+        torrent.destroy({ destroyStore: false }, () => {});
+      } catch (err) {
+        /* ignore */
+      }
       reject(new Error(reason));
     };
 
@@ -88,12 +115,20 @@ export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTime
       const percent = (torrent.progress * 100).toFixed(2);
       const speed = (torrent.downloadSpeed / 1024 / 1024).toFixed(2);
       const peers = torrent.numPeers;
-      const timeRemaining = torrent.timeRemaining > 0 ? (torrent.timeRemaining / 1000).toFixed(0) : '∞';
-      const eta = timeRemaining === '∞' ? '∞' : timeRemaining > 3600
-        ? `${(timeRemaining / 3600).toFixed(1)}h`
-        : `${(timeRemaining / 60).toFixed(1)}m`;
+      const timeRemaining =
+        torrent.timeRemaining > 0
+          ? (torrent.timeRemaining / 1000).toFixed(0)
+          : "∞";
+      const eta =
+        timeRemaining === "∞"
+          ? "∞"
+          : timeRemaining > 3600
+          ? `${(timeRemaining / 3600).toFixed(1)}h`
+          : `${(timeRemaining / 60).toFixed(1)}m`;
 
-      process.stdout.write(`⏳ ${percent}% | 🚀 ${speed} MB/s | 👥 ${peers} peers | ⏱️ ETA: ${eta}       \r`);
+      process.stdout.write(
+        `⏳ ${percent}% | 🚀 ${speed} MB/s | 👥 ${peers} peers | ⏱️ ETA: ${eta}       \r`
+      );
     });
 
     /** STALL DETECTOR (only AFTER metadata) - SMARTER with peer recovery */
@@ -103,7 +138,9 @@ export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTime
       if (torrent.progress === lastProgress && torrent.progress < 1) {
         if (torrent.numPeers === 0) {
           if (!stallWarned) {
-            console.warn("\n⏳ No peers available! Searching for more peers...");
+            console.warn(
+              "\n⏳ No peers available! Searching for more peers..."
+            );
             stallWarned = true;
           }
         } else if (stallWarned) {
@@ -121,10 +158,10 @@ export function downloadTorrent(magnetLink, metadataTimeoutMs = 60000, stallTime
       clearInterval(stallChecker);
       console.log("\n✅ Download completed");
 
-      const files = torrent.files.map(f => ({
+      const files = torrent.files.map((f) => ({
         name: f.name,
         path: path.resolve(DOWNLOAD_DIR, f.path), // Use absolute path
-        size: f.length // bytes, exact size from torrent metadata
+        size: f.length, // bytes, exact size from torrent metadata
       }));
 
       resolve(files);
