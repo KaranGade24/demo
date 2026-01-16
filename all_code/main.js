@@ -48,7 +48,10 @@ import {
   downloadTorrent,
   client as torrentClient,
 } from "./modules/downloader.js";
-import { uploadMediaAxios } from "./modules/telegram_uploader.js";
+import {
+  uploadMediaAxios,
+  refreshSystemCleanup,
+} from "./modules/telegram_uploader.js";
 import { connectDB } from "./db/config.js";
 import dotenv from "dotenv";
 
@@ -90,6 +93,16 @@ async function run() {
             },
           });
           console.log("🎉 Uploaded:", info.name);
+
+          // Ensure a fresh state before continuing to the next file
+          try {
+            await refreshSystemCleanup({
+              absPath: file.path,
+              parentDir: path.dirname(file.path),
+            });
+          } catch (err) {
+            console.warn("⚠️ refreshSystemCleanup failed:", err.message);
+          }
         }
 
         await processedColl.insertOne({
