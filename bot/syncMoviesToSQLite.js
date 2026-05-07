@@ -1,6 +1,10 @@
 const { sqlConnect } = require("./db");
 const File = require("./File.model");
 
+// ========================================
+// FULL SYNC MONGODB -> SQLITE
+// ========================================
+
 exports.syncMoviesToSQLite = async (db) => {
   try {
     if (!db) db = sqlConnect();
@@ -8,9 +12,19 @@ exports.syncMoviesToSQLite = async (db) => {
     console.info("🔄 Streaming from MongoDB...");
 
     const insert = db.prepare(`
-      INSERT OR REPLACE INTO movies
-      (id, title, fileId, file_unique_id, fileSize, mimeType)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO movies (
+        id,
+        title,
+        fileId,
+        file_unique_id,
+        fileSize,
+        mimeType,
+        message_id,
+        channelId,
+        uploadedByBot
+      )
+
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const insertMany = db.transaction((batch) => {
@@ -18,10 +32,13 @@ exports.syncMoviesToSQLite = async (db) => {
         insert.run(
           m._id.toString(),
           m.title || "",
-          m.fileId,
-          m.file_unique_id,
+          m.fileId || "",
+          m.file_unique_id || "",
           m.fileSize || 0,
-          m.mimeType || ""
+          m.mimeType || "",
+          m.message_id || 0,
+          m.channelId || "",
+          m.uploadedByBot || "unknown_bot"
         );
       }
     });
@@ -29,24 +46,29 @@ exports.syncMoviesToSQLite = async (db) => {
     const cursor = File.find({}).lean().cursor();
 
     let batch = [];
-    const BATCH_SIZE = 500; // 🔥 adjust (500–2000 best)
+
+    const BATCH_SIZE = 500;
 
     let count = 0;
 
     for await (const doc of cursor) {
       batch.push(doc);
 
-      if (batch.length === BATCH_SIZE) {
+      if (batch.length >= BATCH_SIZE) {
         insertMany(batch);
+
         count += batch.length;
+
         console.info(`✅ Inserted: ${count}`);
+
         batch = [];
       }
     }
 
-    // Insert remaining
+    // REMAINING
     if (batch.length > 0) {
       insertMany(batch);
+
       count += batch.length;
     }
 
@@ -56,23 +78,42 @@ exports.syncMoviesToSQLite = async (db) => {
   }
 };
 
+// ========================================
+// SINGLE INSERT / UPDATE
+// ========================================
+
 exports.insertMovieToSQLite = (fileData, db) => {
   try {
     if (!db) db = sqlConnect();
 
     const insert = db.prepare(`
-      INSERT OR REPLACE INTO movies
-      (id, title, fileId, file_unique_id, fileSize, mimeType)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO movies (
+
+        id,
+        title,
+        fileId,
+        file_unique_id,
+        fileSize,
+        mimeType,
+        message_id,
+        channelId,
+        uploadedByBot
+
+      )
+
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     insert.run(
       fileData._id.toString(),
       fileData.title || "",
-      fileData.fileId,
-      fileData.file_unique_id,
+      fileData.fileId || "",
+      fileData.file_unique_id || "",
       fileData.fileSize || 0,
-      fileData.mimeType || ""
+      fileData.mimeType || "",
+      fileData.message_id || 0,
+      fileData.channelId || "",
+      fileData.uploadedByBot || "unknown_bot"
     );
 
     console.info("✅ Inserted into SQLite:", fileData.title);
@@ -81,51 +122,94 @@ exports.insertMovieToSQLite = (fileData, db) => {
   }
 };
 
+// ========================================
+// SEARCH MOVIES
+// ========================================
+
 exports.searchByTitle = (db, query, page = 1, limit = 8) => {
-  if (!db) db = sqlConnect();
+  try {
+    if (!db) db = sqlConnect();
 
-  const offset = (page - 1) * limit;
+    const offset = (page - 1) * limit;
 
-  const results = db
-    .prepare(
-      `
-    SELECT id, title, fileId, fileSize
-    FROM movies
-    WHERE title LIKE ?
-    LIMIT ? OFFSET ?
-  `
-    )
-    .all(`%${query}%`, limit, offset);
+    const results = db
+      .prepare(
+        `
+      SELECT
+        id,
+        title,
+        fileId,
+        fileSize,
+        mimeType,
+        message_id,
+        channelId,
+        file_unique_id
 
-  const total = db
-    .prepare(
-      `
-    SELECT COUNT(*) as count 
-    FROM movies 
-    WHERE title LIKE ?
-  `
-    )
-    .get(`%${query}%`).count;
+      FROM movies
 
-  return {
-    results,
-    totalPages: Math.ceil(total / limit),
-    currentPage: page,
-    totalResults: total,
-    Query: query,
-  };
+      WHERE title LIKE ?
+
+      LIMIT ? OFFSET ?
+    `
+      )
+      .all(`%${query}%`, limit, offset);
+
+    const total = db
+      .prepare(
+        `
+      SELECT COUNT(*) as count
+
+      FROM movies
+
+      WHERE title LIKE ?
+    `
+      )
+      .get(`%${query}%`).count;
+
+    return {
+      results,
+      totalPages: Math.ceil(total / limit),
+      currentPage: page,
+      totalResults: total,
+      Query: query,
+    };
+  } catch (err) {
+    console.error("❌ Search error:", err);
+
+    return {
+      results: [],
+      totalPages: 0,
+      currentPage: 1,
+      totalResults: 0,
+      Query: query,
+    };
+  }
 };
 
+// ========================================
+// GET MOVIE BY ID
+// ========================================
+
 exports.getById = (id, db) => {
-  if (!db) db = sqlConnect();
+  try {
+    if (!db) db = sqlConnect();
 
-  const movie = db
-    .prepare(
-      `
-    SELECT * FROM movies WHERE id = ?
-  `
-    )
-    .get(id);
+    const movie = db
+      .prepare(
+        `
+      SELECT *
 
-  return movie;
+      FROM movies
+
+      WHERE id = ?
+    `
+      )
+      .get(id);
+
+    return movie;
+  } catch (err) {
+    console.error("❌ getById error:", err);
+
+    return null;
+  }
 };

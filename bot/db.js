@@ -19,15 +19,29 @@ exports.sqlConnect = () => {
     // Create table
     db.prepare(
       `
-      CREATE TABLE IF NOT EXISTS movies (
-        id TEXT PRIMARY KEY,
-        title TEXT,
-        fileId TEXT,
-        file_unique_id TEXT,
-        fileSize INTEGER,
-        mimeType TEXT
-      )
-    `
+  CREATE TABLE IF NOT EXISTS movies (
+    id TEXT PRIMARY KEY,
+
+    title TEXT NOT NULL,
+
+    -- TEMPORARY TELEGRAM FILE ID
+    fileId TEXT NOT NULL,
+
+    -- PERMANENT TELEGRAM FILE UNIQUE ID
+    file_unique_id TEXT UNIQUE NOT NULL,
+
+    -- RECOVERY INFORMATION
+    channelId TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+
+    fileSize INTEGER DEFAULT 0,
+    mimeType TEXT,
+
+    uploadedByBot TEXT,
+
+    createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`
     ).run();
 
     // Indexes

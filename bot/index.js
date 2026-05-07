@@ -18,6 +18,7 @@ const {
   syncMoviesToSQLite,
   getById,
 } = require("./syncMoviesToSQLite");
+const sendMovie = require("./sendMovie.helper");
 
 //DB connection
 var sqlDB = null;
@@ -53,7 +54,10 @@ bot.onText(/\/start/, (msg) => {
   try {
     bot.sendMessage(
       msg.chat.id,
-      "Welcome! Bot is running in Docker using node-telegram-bot-api. 🐳"
+      "Welcome! Search for movies by title (eg., 'Avengers').",
+      {
+        parse_mode: "HTML",
+      }
     );
   } catch (err) {
     console.error(err);
@@ -120,6 +124,9 @@ const inline_keyboard_genarator = (
 bot.on("message", async (msg) => {
   try {
     const text = msg.text?.trim().toLowerCase();
+    if (text === "/start") return;
+    if (text.length > 50)
+      return bot.sendMessage(msg.chat.id, "❌ Maximum 50 characters");
     if (!text) return;
 
     const chatId = msg.chat.id;
@@ -239,7 +246,6 @@ bot.on("callback_query", async (query) => {
         const id = query.data.split("=")[1];
 
         const movie = getById(id, sqlDB); // SQLite fetch
-
         if (!movie) {
           return bot.answerCallbackQuery(query.id, {
             text: "❌ File not found",
@@ -252,29 +258,12 @@ bot.on("callback_query", async (query) => {
         // 🎬 Clean title (optional)
         const title = movie.title || "Unknown File";
 
-        // ✨ Caption (styled)
-        const caption = `
-🎬 <b>${title}</b>
-
-━━━━━━━━━━━━━━━━━━
-
-📦 Size: ${(movie.fileSize / (1024 * 1024)).toFixed(2)} MB
-📁 Format: ${movie.mimeType || "Unknown"}
-
-━━━━━━━━━━━━━━━━━━
-
-🚀 <i>Powered by <a href="https://t.me/+_OhMUT6XxBkwNWFl">@movie_time_Channel</a></i>
-
-🚀 <i>Join for more <a href="https://t.me/movie_time_v1">movie_time_Group</a></i>
-
-🚀<i>Search Movies <a href="https://t.me/movie_time_v1_bot">movie_time_bot</a></i>
-`;
-
         // 📤 Send file
-        await bot.sendDocument(chat_id, movie.fileId, {
-          caption: caption,
-          parse_mode: "HTML",
-        });
+        // await bot.sendDocument(chat_id, movie.fileId, {
+        //   caption: caption,
+        //   parse_mode: "HTML",
+        // });
+        await sendMovie(bot, chat_id, movie);
 
         // ✅ Callback response
         bot.answerCallbackQuery(query.id, {
@@ -297,7 +286,10 @@ bot.on("callback_query", async (query) => {
 bot.addListener("channel_post", async (msg) => {
   try {
     if (msg.video || msg.document) {
-      const savedFile = await saveFileToDB(msg);
+      const savedFile = await saveFileToDB(
+        msg,
+        bot.botInfo?.username || "unknown_bot"
+      );
       // 👆 make sure this RETURNS saved Mongo document
 
       // 🔥 Insert into SQLite instantly
